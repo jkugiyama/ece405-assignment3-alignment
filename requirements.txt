@@ -1,4 +1,5 @@
-vllm
+flash-attn==2.7.4.post1; sys_platform == "linux"
+vllm; sys_platform == "linux"
 torch
 transformers
 alpaca_eval @ git+https://github.com/nelson-liu/alpaca_eval.git@forward_kwargs_to_vllm

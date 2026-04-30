@@ -210,7 +210,16 @@ def output_strs():
 
 @pytest.fixture
 def model_id():
-    return "/data/a5-alignment/models/Qwen2.5-Math-1.5B"
+    # Allow explicit override while keeping a portable default for this repo layout.
+    model_path_override = os.environ.get("QWEN_TINY_MODEL_PATH")
+    if model_path_override:
+        return model_path_override
+
+    default_local_path = Path(__file__).resolve().parents[1].parent / "Qwen" / "Qwen2.5-0.5B"
+    if default_local_path.exists():
+        return str(default_local_path)
+
+    return "Qwen/Qwen2.5-0.5B"
 
 
 @pytest.fixture
