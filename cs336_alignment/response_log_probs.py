@@ -17,17 +17,13 @@ def get_response_log_probs(
     gathered_log_probs = torch.gather(
         log_probs,
         dim=-1,
-        index=labels.unsqueeze(-1)
+        index=labels.unsqueeze(-1),
     ).squeeze(-1)  # (B, T)
-
-    # mask out padding tokens (here assumed to be -100)
-    gathered_log_probs = gathered_log_probs.masked_fill(labels == -100, 0.0)
 
     result = {"log_probs": gathered_log_probs}
 
     if return_token_entropy:
         entropy = compute_entropy(logits)
-        entropy = entropy.masked_fill(labels == 0, 0.0)
         result["token_entropy"] = entropy
 
     return result
