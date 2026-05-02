@@ -1,0 +1,8 @@
+{
+  "num_train_examples": 256,
+  "filter_stats": null,
+  "total_update_steps": 1,
+  "final_learning_rate": 0.0,
+  "curve_path": "outputs/sft_math_sweep/size_256/validation_curve.json",
+  "last_eval": null
+}

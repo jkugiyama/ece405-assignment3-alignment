@@ -320,6 +320,31 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
 		train_examples = train_examples[: args.max_train_examples]
 
 	logger.info("Loaded %d SFT training examples", len(train_examples))
+	if len(train_examples) == 0:
+		logger.warning("No training examples available; skipping optimization and writing empty outputs.")
+		save_dir = Path(args.output_dir)
+		save_dir.mkdir(parents=True, exist_ok=True)
+
+		curve_rows: list[dict[str, float | int]] = []
+		curve_path = save_dir / "validation_curve.json"
+		with open(curve_path, "w", encoding="utf-8") as f:
+			json.dump(curve_rows, f, indent=2)
+
+		summary = {
+			"num_train_examples": 0,
+			"filter_stats": filter_stats,
+			"total_update_steps": 0,
+			"final_learning_rate": None,
+			"curve_path": str(curve_path),
+			"last_eval": None,
+		}
+		summary_path = save_dir / "summary.json"
+		with open(summary_path, "w", encoding="utf-8") as f:
+			json.dump(summary, f, indent=2)
+
+		logger.info("Saved validation curve to %s", curve_path)
+		logger.info("Saved summary to %s", summary_path)
+		return summary
 
 	eval_prompts, eval_answers = build_eval_prompts(args.validation_jsonl_path, args.prompt_template_path)
 	logger.info("Loaded %d validation examples", len(eval_prompts))
@@ -503,6 +528,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
 
 	summary = {
 		"num_train_examples": len(train_examples),
+		"filter_stats": filter_stats,
 		"total_update_steps": global_update_step,
 		"final_learning_rate": float(scheduler.get_last_lr()[0]),
 		"curve_path": str(curve_path),
