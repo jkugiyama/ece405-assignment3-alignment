@@ -1,231 +1,203 @@
 import argparse
 import json
-import logging
+import os
 from collections import Counter
 from pathlib import Path
-from statistics import mean
-from typing import Any, Callable, List, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from vllm import LLM, SamplingParams
 
 from cs336_alignment.drgrpo_grader import r1_zero_reward_fn
 
-logger = logging.getLogger(__name__)
 
-QWEN_BASE_PATH = "/data/a5-alignment/models/Qwen2.5-Math-1.5B"
-DEFAULT_DATA_PATH = "/data/a5-alignment/MATH/validation.jsonl"
-DEFAULT_PROMPT_PATH = "cs336_alignment/prompts/r1_zero.prompt"
-DEFAULT_OUTPUT_DIR = "outputs/math_baseline"
-
-
-def run_vllm(vllm_model: LLM, prompts: List[str], sampling_params: SamplingParams) -> List[str]:
-	outputs = vllm_model.generate(prompts, sampling_params)
-	return [output.text for response in outputs for output in response.outputs]
+DEFAULT_MODEL = os.environ.get("QWEN_BASE_PATH", "Qwen/Qwen2.5-Math-1.5B")
+DEFAULT_DATA = os.environ.get("DATA_PATH", "/content/validation.jsonl")
+DEFAULT_PROMPT = os.environ.get("PROMPT_PATH", "prompts/r1_zero.prompt")
+DEFAULT_OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "/content/outputs/math_baseline")
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Evaluate Qwen-Math baseline with r1_zero reward.")
+    parser.add_argument("--model", default=DEFAULT_MODEL, help="Model path or HF model id.")
+    parser.add_argument("--data", default=DEFAULT_DATA, help="Path to validation .jsonl file.")
+    parser.add_argument("--prompt", default=DEFAULT_PROMPT, help="Prompt template path.")
+    parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR, help="Where to write output jsonl.")
+    parser.add_argument("--max-examples", type=int, default=None, help="Optional cap for quick Colab smoke tests.")
+    parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--top-p", type=float, default=1.0)
+    parser.add_argument("--max-tokens", type=int, default=1024)
+    parser.add_argument("--tensor-parallel-size", type=int, default=1)
+    return parser.parse_args()
+
+
+def resolve_prompt_path(prompt_path: str) -> str:
+    prompt_candidate = Path(prompt_path)
+    if prompt_candidate.is_file():
+        return str(prompt_candidate)
+
+    file_relative = Path(__file__).resolve().parent / prompt_path
+    if file_relative.is_file():
+        return str(file_relative)
+
+    raise FileNotFoundError(
+        f"Prompt template not found. Tried: '{prompt_path}' and '{file_relative}'"
+    )
+
+
+# Core vLLM generation
+def run_vllm(llm: LLM, prompts: List[str], sampling_params: SamplingParams) -> List[str]:
+    outputs = llm.generate(prompts, sampling_params)
+    return [out.text for resp in outputs for out in resp.outputs]
+
+
+# Evaluation
 def evaluate_vllm(
-	vllm_model: LLM,
-	reward_fn: Callable[[str, str], dict[str, float]],
-	prompts: List[str],
-	answers: List[str],
-	eval_sampling_params: SamplingParams,
-) -> List[dict[str, Any]]:
-	"""
-	Evaluate a language model on a list of prompts,
-	compute evaluation metrics, and return per-example records.
-	"""
-	responses = run_vllm(vllm_model, prompts, eval_sampling_params)
-	info_dicts: List[dict[str, Any]] = []
+    llm: LLM,
+    reward_fn: Callable[[str, str], dict],
+    prompts: List[str],
+    answers: List[str],
+    sampling_params: SamplingParams,
+) -> List[dict]:
+    responses = run_vllm(llm, prompts, sampling_params)
 
-	for prompt, answer, response in zip(prompts, answers, responses):
-		metrics = reward_fn(response, answer)
-		info_dicts.append(
-			{
-				"prompt": prompt,
-				"answer": answer,
-				"response": response,
-				"format_reward": float(metrics["format_reward"]),
-				"answer_reward": float(metrics["answer_reward"]),
-				"reward": float(metrics["reward"]),
-			}
-		)
+    results = []
+    for prompt, response, answer in zip(prompts, responses, answers):
+        reward_dict = reward_fn(response, answer)
+        results.append(
+            {
+                "prompt": prompt,
+                "response": response,
+                "answer": answer,
+                "format_reward": reward_dict["format_reward"],
+                "answer_reward": reward_dict["answer_reward"],
+            }
+        )
 
-	return info_dicts
+    return results
 
 
-def _resolve_prompt_path(prompt_path: str) -> Path:
-	candidate = Path(prompt_path)
-	if candidate.exists():
-		return candidate
+# Data loading
+def load_and_format_prompts(
+    data_path: str,
+    prompt_path: str,
+    max_examples: Optional[int] = None,
+) -> Tuple[List[str], List[str]]:
+    resolved_prompt_path = resolve_prompt_path(prompt_path)
 
-	repo_root = Path(__file__).resolve().parents[1]
-	repo_candidate = repo_root / prompt_path
-	if repo_candidate.exists():
-		return repo_candidate
+    with open(resolved_prompt_path, "r", encoding="utf-8") as f:
+        prompt_template = f.read()
 
-	raise FileNotFoundError(f"Prompt file not found: {prompt_path}")
+    prompts, answers = [], []
 
+    with open(data_path, "r", encoding="utf-8") as f:
+        for line in f:
+            data = json.loads(line)
+            prompts.append(prompt_template.format(question=data["problem"]))
+            answers.append(data["answer"])
+            if max_examples is not None and len(prompts) >= max_examples:
+                break
 
-def load_and_format_prompts(data_path: str, prompt_path: str) -> Tuple[List[str], List[str]]:
-	resolved_prompt_path = _resolve_prompt_path(prompt_path)
-	with open(resolved_prompt_path, "r") as prompt_file:
-		prompt_template = prompt_file.read()
-
-	prompts: List[str] = []
-	answers: List[str] = []
-
-	with open(data_path, "r") as data_file:
-		for line in data_file:
-			data = json.loads(line)
-			prompts.append(prompt_template.format(question=data["problem"]))
-			answers.append(str(data["answer"]))
-
-	return prompts, answers
+    return prompts, answers
 
 
-def build_llm_and_params(model_path: str, num_gpus: int, max_tokens: int) -> Tuple[LLM, SamplingParams]:
-	llm = LLM(model=model_path, tensor_parallel_size=num_gpus, trust_remote_code=True)
-	sampling_params = SamplingParams(
-		temperature=0.0,
-		top_p=1.0,
-		max_tokens=max_tokens,
-		stop=["</answer>"],
-		include_stop_str_in_output=True,
-	)
-	return llm, sampling_params
+# Model + sampling
+def build_llm(model_path: str, tensor_parallel_size: int) -> LLM:
+    return LLM(model=model_path, tensor_parallel_size=tensor_parallel_size)
 
 
-def serialize_results(records: List[dict[str, Any]], output_path: str) -> None:
-	out_path = Path(output_path)
-	out_path.parent.mkdir(parents=True, exist_ok=True)
-
-	with open(out_path, "w") as f:
-		for record in records:
-			f.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-
-def inspect_info_dicts(info_dicts: List[dict[str, Any]]) -> None:
-	counter = Counter()
-	bad_formats: List[str] = []
-	bad_answers: List[str] = []
-
-	for info_dict in info_dicts:
-		format_reward = info_dict["format_reward"]
-		answer_reward = info_dict["answer_reward"]
-
-		if format_reward == 1.0 and answer_reward == 1.0:
-			counter["correct"] += 1
-		elif format_reward == 1.0 and answer_reward == 0.0:
-			counter["format_correct_answer_incorrect"] += 1
-			bad_answers.append(info_dict["response"])
-		else:
-			counter["incorrect"] += 1
-			bad_formats.append(info_dict["response"])
-
-	logger.info("Breakdown: %s", dict(counter))
-	logger.info("Sample bad format responses (up to 10): %s", bad_formats[:10])
-	logger.info("Sample bad answer responses (up to 10): %s", bad_answers[:10])
+def build_sampling_params(temperature: float, top_p: float, max_tokens: int) -> SamplingParams:
+    return SamplingParams(
+        temperature=temperature,
+        top_p=top_p,
+        max_tokens=max_tokens,
+        stop=["</answer>"],
+        include_stop_str_in_output=True,
+    )
 
 
-def summarize_records(records: List[dict[str, Any]], n_examples_to_show: int = 10) -> dict[str, Any]:
-	counter = Counter()
-	bad_formats: List[dict[str, Any]] = []
-	bad_answers: List[dict[str, Any]] = []
-	correct: List[dict[str, Any]] = []
+# Metrics + inspection
+def compute_metrics(results: List[dict]) -> None:
+    total = len(results)
+    if total == 0:
+        print("No results to score.")
+        return
 
-	for record in records:
-		format_reward = record["format_reward"]
-		answer_reward = record["answer_reward"]
+    counter = Counter()
+    bad_formats = []
+    bad_answers = []
 
-		if format_reward == 1.0 and answer_reward == 1.0:
-			counter["correct"] += 1
-			if len(correct) < n_examples_to_show:
-				correct.append(record)
-		elif format_reward == 1.0 and answer_reward == 0.0:
-			counter["format_correct_answer_incorrect"] += 1
-			if len(bad_answers) < n_examples_to_show:
-				bad_answers.append(record)
-		elif format_reward == 0.0 and answer_reward == 0.0:
-			counter["format_incorrect_answer_incorrect"] += 1
-			if len(bad_formats) < n_examples_to_show:
-				bad_formats.append(record)
+    for r in results:
+        if r["format_reward"] == 1.0 and r["answer_reward"] == 1.0:
+            counter["cat1_correct_both_1"] += 1
+        elif r["format_reward"] == 1.0 and r["answer_reward"] == 0.0:
+            counter["cat2_format1_answer0"] += 1
+            bad_answers.append(r["response"])
+        else:
+            counter["cat3_format0_answer0"] += 1
+            bad_formats.append(r["response"])
 
-	summary = {
-		"num_examples": len(records),
-		"reward_mean": mean(record["reward"] for record in records) if records else 0.0,
-		"format_reward_mean": mean(record["format_reward"] for record in records) if records else 0.0,
-		"answer_reward_mean": mean(record["answer_reward"] for record in records) if records else 0.0,
-		"category_counts": {
-			"correct": counter["correct"],
-			"format_correct_answer_incorrect": counter["format_correct_answer_incorrect"],
-			"format_incorrect_answer_incorrect": counter["format_incorrect_answer_incorrect"],
-		},
-		"examples": {
-			"correct": correct,
-			"format_incorrect_answer_incorrect": bad_formats,
-			"format_correct_answer_incorrect": bad_answers,
-		},
-	}
-	return summary
+    accuracy = counter["cat1_correct_both_1"] / total
+    format_acc = (counter["cat1_correct_both_1"] + counter["cat2_format1_answer0"]) / total
+
+    print("\n=== Metrics ===")
+    print(f"Total examples: {total}")
+    print(f"Category (1) format=1 answer=1: {counter['cat1_correct_both_1']}")
+    print(f"Category (2) format=1 answer=0: {counter['cat2_format1_answer0']}")
+    print(f"Category (3) format=0 answer=0: {counter['cat3_format0_answer0']}")
+    print(f"Accuracy (category 1): {accuracy:.4f}")
+    print(f"Format accuracy (cat1 + cat2): {format_acc:.4f}")
+
+    print("\n--- Example bad formats (first 10) ---")
+    for x in bad_formats[:10]:
+        print(x)
+        print("-" * 40)
+
+    print("\n--- Example wrong answers (first 10) ---")
+    for x in bad_answers[:10]:
+        print(x)
+        print("-" * 40)
 
 
-def main(args: argparse.Namespace) -> None:
-	prompts, answers = load_and_format_prompts(args.data_path, args.prompt_path)
+# Save results
+def save_results(results: List[dict], output_path: str) -> None:
+    with open(output_path, "w", encoding="utf-8") as f:
+        for r in results:
+            f.write(json.dumps(r) + "\n")
 
-	if args.max_examples is not None:
-		prompts = prompts[: args.max_examples]
-		answers = answers[: args.max_examples]
 
-	llm, sampling_params = build_llm_and_params(args.model_path, args.num_gpus, args.max_tokens)
-	records = evaluate_vllm(llm, r1_zero_reward_fn, prompts, answers, sampling_params)
-	inspect_info_dicts(records)
+def main() -> None:
+    args = parse_args()
 
-	serialize_results(records, args.output_path)
-	summary = summarize_records(records, n_examples_to_show=args.examples_per_category)
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    model_name = args.model.rstrip("/").split("/")[-1]
+    output_path = output_dir / f"{model_name}_r1_zero.jsonl"
 
-	summary_path = Path(args.summary_path)
-	summary_path.parent.mkdir(parents=True, exist_ok=True)
-	with open(summary_path, "w") as f:
-		json.dump(summary, f, ensure_ascii=False, indent=2)
+    print("Loading data...")
+    prompts, answers = load_and_format_prompts(args.data, args.prompt, args.max_examples)
+    print(f"Loaded {len(prompts)} examples")
 
-	logger.info("Saved per-example results to %s", args.output_path)
-	logger.info("Saved summary to %s", args.summary_path)
-	logger.info("Category counts: %s", summary["category_counts"])
-	logger.info(
-		"Metrics: reward_mean=%.4f format_reward_mean=%.4f answer_reward_mean=%.4f",
-		summary["reward_mean"],
-		summary["format_reward_mean"],
-		summary["answer_reward_mean"],
-	)
+    print("Building model...")
+    llm = build_llm(args.model, args.tensor_parallel_size)
+    sampling_params = build_sampling_params(args.temperature, args.top_p, args.max_tokens)
+
+    print("Running evaluation...")
+    results = evaluate_vllm(
+        llm,
+        r1_zero_reward_fn,
+        prompts,
+        answers,
+        sampling_params,
+    )
+
+    print("Computing metrics...")
+    compute_metrics(results)
+
+    print("Saving results...")
+    save_results(results, str(output_path))
+
+    print(f"\nDone! Results saved to: {output_path}")
 
 
 if __name__ == "__main__":
-	logging.basicConfig(
-		format="%(asctime)s - %(module)s - %(levelname)s - %(message)s",
-		level=logging.INFO,
-	)
-
-	parser = argparse.ArgumentParser(description="Evaluate zero-shot Qwen2.5-Math-1.5B on MATH validation")
-	parser.add_argument("--data-path", type=str, default=DEFAULT_DATA_PATH)
-	parser.add_argument("--model-path", type=str, default=QWEN_BASE_PATH)
-	parser.add_argument("--prompt-path", type=str, default=DEFAULT_PROMPT_PATH)
-	parser.add_argument("--output-dir", type=str, default=DEFAULT_OUTPUT_DIR)
-	parser.add_argument("--output-path", type=str, default=None)
-	parser.add_argument("--summary-path", type=str, default=None)
-	parser.add_argument("--num-gpus", type=int, default=1)
-	parser.add_argument("--max-tokens", type=int, default=1024)
-	parser.add_argument("--max-examples", type=int, default=None)
-	parser.add_argument("--examples-per-category", type=int, default=10)
-	parsed_args = parser.parse_args()
-
-	out_dir = Path(parsed_args.output_dir)
-	out_dir.mkdir(parents=True, exist_ok=True)
-
-	model_name = Path(parsed_args.model_path).name
-	if parsed_args.output_path is None:
-		parsed_args.output_path = str(out_dir / f"{model_name}_r1_zero.jsonl")
-	if parsed_args.summary_path is None:
-		parsed_args.summary_path = str(out_dir / f"{model_name}_r1_zero_summary.json")
-
-	logger.info("Running evaluator")
-	main(parsed_args)
+    main()
