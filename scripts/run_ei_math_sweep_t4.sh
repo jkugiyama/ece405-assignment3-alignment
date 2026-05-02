@@ -26,6 +26,21 @@ MAX_CONFIGS="${MAX_CONFIGS:-4}"
 PER_DEVICE_BATCH_SIZE="${PER_DEVICE_BATCH_SIZE:-1}"
 GRADIENT_ACCUM_STEPS="${GRADIENT_ACCUM_STEPS:-16}"
 LEARNING_RATE="${LEARNING_RATE:-1e-5}"
+POLICY_DEVICE="${POLICY_DEVICE:-cuda:0}"
+VLLM_DEVICE="${VLLM_DEVICE:-cuda:0}"
+
+if ! uv run python - <<'PY'
+import torch
+import importlib.util
+if not torch.cuda.is_available():
+    raise SystemExit("CUDA is not available. Run this on a GPU runtime (e.g., Colab T4).")
+if importlib.util.find_spec("vllm") is None:
+    raise SystemExit("vLLM is not installed in this environment.")
+print("Runtime check passed: CUDA + vLLM available")
+PY
+then
+  exit 1
+fi
 
 uv run python scripts/ei_math_sweep.py \
   --model-name-or-path "Qwen/Qwen2.5-Math-1.5B" \
@@ -41,7 +56,7 @@ uv run python scripts/ei_math_sweep.py \
   --learning-rate "$LEARNING_RATE" \
   --per-device-batch-size "$PER_DEVICE_BATCH_SIZE" \
   --gradient-accumulation-steps "$GRADIENT_ACCUM_STEPS" \
-  --policy-device cuda:0 \
-  --vllm-device cuda:0
+  --policy-device "$POLICY_DEVICE" \
+  --vllm-device "$VLLM_DEVICE"
 
 echo "EI sweep done: $OUTPUT_DIR/sweep_summary.json"
